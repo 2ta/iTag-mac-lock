@@ -8,6 +8,7 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             statusSection
+            countdownSection
             rssiSection
             Divider()
             pairingSection
@@ -35,6 +36,33 @@ struct MenuBarView: View {
             .font(.subheadline)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private var countdownSection: some View {
+        if let remaining = monitor.countdownRemaining {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "lock.trianglebadge.exclamationmark")
+                    Text("Locking in \(remaining)s")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                }
+                .foregroundStyle(.orange)
+
+                HStack(spacing: 8) {
+                    Button("Don't Lock") {
+                        monitor.cancelLockCountdown()
+                    }
+                    Button("Lock Now") {
+                        monitor.lockNow()
+                    }
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        }
     }
 
     @ViewBuilder
@@ -174,6 +202,36 @@ struct MenuBarView: View {
                     step: 1
                 )
             }
+
+            Toggle(
+                "Warn before locking",
+                isOn: Binding(
+                    get: { monitor.settings.countdownEnabled },
+                    set: { monitor.settings.countdownEnabled = $0 }
+                )
+            )
+            .font(.subheadline)
+
+            if monitor.settings.countdownEnabled {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Countdown")
+                        Spacer()
+                        Text(countdownLabel)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.subheadline)
+                    Slider(
+                        value: Binding(
+                            get: { monitor.settings.countdownSeconds },
+                            set: { monitor.settings.countdownSeconds = $0 }
+                        ),
+                        in: 3...30,
+                        step: 1
+                    )
+                }
+            }
         }
     }
 
@@ -203,6 +261,11 @@ struct MenuBarView: View {
 
     private var debounceLabel: String {
         let seconds = Int(monitor.settings.debounceSeconds.rounded())
+        return seconds == 1 ? "1 second" : "\(seconds) seconds"
+    }
+
+    private var countdownLabel: String {
+        let seconds = Int(monitor.settings.countdownSeconds.rounded())
         return seconds == 1 ? "1 second" : "\(seconds) seconds"
     }
 

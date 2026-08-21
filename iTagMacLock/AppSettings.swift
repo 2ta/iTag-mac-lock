@@ -11,11 +11,14 @@ final class AppSettings {
         static let rssiThreshold = "rssiThreshold"
         static let debounceSeconds = "debounceSeconds"
         static let monitoringEnabled = "monitoringEnabled"
+        static let countdownEnabled = "countdownEnabled"
+        static let countdownSeconds = "countdownSeconds"
     }
 
     /// Default: roughly “across a room”. More negative = farther away before lock.
     static let defaultRSSIThreshold = -75
     static let defaultDebounceSeconds = 3.0
+    static let defaultCountdownSeconds = 10.0
 
     var pairedPeripheralID: UUID? {
         didSet {
@@ -47,6 +50,18 @@ final class AppSettings {
         }
     }
 
+    var countdownEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(countdownEnabled, forKey: Key.countdownEnabled)
+        }
+    }
+
+    var countdownSeconds: Double {
+        didSet {
+            UserDefaults.standard.set(countdownSeconds, forKey: Key.countdownSeconds)
+        }
+    }
+
     private init() {
         if let raw = UserDefaults.standard.string(forKey: Key.pairedPeripheralID) {
             pairedPeripheralID = UUID(uuidString: raw)
@@ -72,6 +87,18 @@ final class AppSettings {
             monitoringEnabled = UserDefaults.standard.bool(forKey: Key.monitoringEnabled)
         } else {
             monitoringEnabled = true
+        }
+
+        if UserDefaults.standard.object(forKey: Key.countdownEnabled) != nil {
+            countdownEnabled = UserDefaults.standard.bool(forKey: Key.countdownEnabled)
+        } else {
+            countdownEnabled = true
+        }
+
+        if UserDefaults.standard.object(forKey: Key.countdownSeconds) != nil {
+            countdownSeconds = UserDefaults.standard.double(forKey: Key.countdownSeconds)
+        } else {
+            countdownSeconds = Self.defaultCountdownSeconds
         }
     }
 }

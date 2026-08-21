@@ -20,6 +20,7 @@ enum MonitorStatus: Equatable {
     case connected
     case weakSignal
     case disconnected
+    case lockingSoon
 }
 
 @MainActor
@@ -35,6 +36,8 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private(set) var rawRSSI: Int?
     private(set) var smoothedRSSI: Double?
     private(set) var isUserScanning = false
+    /// Whole seconds left before lock. `nil` when no countdown is running.
+    private(set) var countdownRemaining: Int?
 
     var menuBarSymbol: String {
         switch status {
@@ -48,6 +51,8 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             return "lock.circle"
         case .connected:
             return "dot.radiowaves.left.and.right"
+        case .lockingSoon:
+            return "lock.trianglebadge.exclamationmark"
         case .weakSignal, .disconnected:
             return "lock.fill"
         case .noDevice:
@@ -77,6 +82,11 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             return "Signal is weak. Locking if it stays weak."
         case .disconnected:
             return "Tag disconnected. Trying to reconnect…"
+        case .lockingSoon:
+            let seconds = countdownRemaining ?? 0
+            return seconds == 1
+                ? "Locking in 1 second. Cancel if you want to stay unlocked."
+                : "Locking in \(seconds) seconds. Cancel if you want to stay unlocked."
         }
     }
 
@@ -89,6 +99,7 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var rssiTimer: Timer?
     private var reconnectTimer: Timer?
     private var connectTimeout: Timer?
+    private var lockCountdownTimer: Timer?
     private var weakSince: Date?
     /// After a lock, wait until the tag is nearby again before another lock can fire.
     private var lockArmed = false
@@ -160,6 +171,7 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         smoothedRSSI = nil
         weakSince = nil
         lockArmed = false
+        clearLockCountdown()
         status = bluetoothState == .poweredOn ? .noDevice : statusFromBluetooth()
     }
 
@@ -180,6 +192,7 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             smoothedRSSI = nil
             weakSince = nil
             lockArmed = false
+            clearLockCountdown()
             status = .paused
             return
         }
@@ -290,6 +303,7 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         weakSince = nil
         lockArmed = false
         pairedPeripheral = nil
+        clearLockCountdown()
         self.status = status
         updateKeepAlive()
     }
@@ -430,7 +444,9 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard bluetoothOn, settings.monitoringEnabled, settings.pairedPeripheralID != nil else {
             return
         }
-        status = .disconnected
+        if countdownRemaining == nil {
+            status = .disconnected
+        }
         scheduleReconnect()
     }
 
@@ -520,16 +536,23 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
         let threshold = Double(settings.rssiThreshold)
         if smoothed <= threshold {
-            status = .weakSignal
+            if countdownRemaining == nil {
+                status = .weakSignal
+            }
             if weakSince == nil {
                 weakSince = Date()
             }
-            if let weakSince, Date().timeIntervalSince(weakSince) >= settings.debounceSeconds {
+            if countdownRemaining == nil,
+               let weakSince, Date().timeIntervalSince(weakSince) >= settings.debounceSeconds {
                 triggerAway()
             }
         } else {
             weakSince = nil
-            status = .connected
+            if countdownRemaining != nil, smoothed >= threshold + Self.hysteresis {
+                cancelLockCountdown()
+            } else if countdownRemaining == nil {
+                status = .connected
+            }
             if smoothed >= threshold + Self.hysteresis {
                 lockArmed = true
             }
@@ -550,7 +573,70 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard settings.monitoringEnabled else { return }
         guard bluetoothState == .poweredOn else { return }
         lockArmed = false
+
+        if settings.countdownEnabled {
+            startLockCountdown()
+        } else {
+            ScreenLocker.lock()
+        }
+    }
+
+    private func startLockCountdown() {
+        guard countdownRemaining == nil else { return }
+        let seconds = max(1, Int(settings.countdownSeconds.rounded()))
+        countdownRemaining = seconds
+        status = .lockingSoon
+        LockCountdownPanel.show()
+        LockCountdownPanel.refresh()
+        startCountdownTicker()
+    }
+
+    private func startCountdownTicker() {
+        lockCountdownTimer?.invalidate()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { _ in
+            Task { @MainActor in
+                TagMonitor.shared.tickLockCountdown()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        lockCountdownTimer = timer
+    }
+
+    private func tickLockCountdown() {
+        guard let remaining = countdownRemaining else { return }
+        if remaining <= 1 {
+            lockNow()
+            return
+        }
+        countdownRemaining = remaining - 1
+        status = .lockingSoon
+        LockCountdownPanel.refresh()
+    }
+
+    func cancelLockCountdown() {
+        clearLockCountdown()
+        restoreStatusAfterCountdown()
+    }
+
+    func lockNow() {
+        clearLockCountdown()
         ScreenLocker.lock()
+        restoreStatusAfterCountdown()
+    }
+
+    private func clearLockCountdown() {
+        lockCountdownTimer?.invalidate()
+        lockCountdownTimer = nil
+        countdownRemaining = nil
+        LockCountdownPanel.hide()
+    }
+
+    private func restoreStatusAfterCountdown() {
+        if pairedPeripheral?.state == .connected {
+            status = currentConnectedStatus()
+        } else if bluetoothState == .poweredOn, settings.monitoringEnabled, settings.pairedPeripheralID != nil {
+            status = .disconnected
+        }
     }
 
     // MARK: - Keep-alive / timers
@@ -575,6 +661,7 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         reconnectTimer = nil
         connectTimeout?.invalidate()
         connectTimeout = nil
+        clearLockCountdown()
     }
 
     // MARK: - Helpers
