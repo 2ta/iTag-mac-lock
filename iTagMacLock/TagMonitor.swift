@@ -7,6 +7,11 @@ struct DiscoveredTag: Identifiable {
     var name: String
     var rssi: Int
     var isLikelyITag: Bool
+
+    var displayName: String {
+        if name != "Unknown" { return name }
+        return isLikelyITag ? "iTAG (no name)" : "Unnamed device"
+    }
 }
 
 enum MonitorStatus: Equatable {
@@ -128,12 +133,15 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         isUserScanning = true
         isReconnectScan = false
         discovered.removeAll()
+        seedConnectedPeripherals()
         beginScan(allowDuplicates: true)
         status = .scanning
+        PairingPanel.show()
     }
 
     func stopUserScan() {
         isUserScanning = false
+        PairingPanel.hide()
         if pairedPeripheral?.state == .connected {
             central.stopScan()
             status = currentConnectedStatus()
@@ -147,11 +155,12 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func pair(_ tag: DiscoveredTag) {
         settings.pairedPeripheralID = tag.id
-        settings.pairedPeripheralName = tag.name
+        settings.pairedPeripheralName = tag.name == "Unknown" ? "iTAG" : tag.name
         isUserScanning = false
         isReconnectScan = false
         central.stopScan()
         lockArmed = false
+        PairingPanel.hide()
         connect(tag.peripheral)
     }
 
@@ -221,8 +230,11 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     ) {
         let rssi = RSSI.intValue
         let advertisedName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        let advertised = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let overflow = advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] ?? []
+        let services = advertised + overflow
         Task { @MainActor in
-            self.handleDiscover(peripheral, advertisedName: advertisedName, rssi: rssi)
+            self.handleDiscover(peripheral, advertisedName: advertisedName, rssi: rssi, services: services)
         }
     }
 
@@ -327,21 +339,39 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         )
     }
 
-    private func handleDiscover(_ peripheral: CBPeripheral, advertisedName: String?, rssi: Int) {
+    private func seedConnectedPeripherals() {
+        let connected = central.retrieveConnectedPeripherals(withServices: Self.itagServiceUUIDs)
+        for peripheral in connected {
+            handleDiscover(
+                peripheral,
+                advertisedName: peripheral.name,
+                rssi: -40,
+                services: Self.itagHintServiceUUIDs
+            )
+        }
+    }
+
+    private func handleDiscover(_ peripheral: CBPeripheral, advertisedName: String?, rssi: Int, services: [CBUUID]) {
         let name = resolvedName(peripheral, advertisedName: advertisedName)
-        let likely = Self.isLikelyITag(name)
+        let likely = Self.isLikelyITag(name: name, services: services)
         let sample = rssi == Self.invalidRSSI ? -100 : rssi
+        let isNew: Bool
 
         if let index = discovered.firstIndex(where: { $0.id == peripheral.identifier }) {
+            isNew = false
             discovered[index].name = name
             discovered[index].rssi = sample
-            discovered[index].isLikelyITag = likely
+            discovered[index].isLikelyITag = likely || discovered[index].isLikelyITag
         } else {
+            isNew = true
             discovered.append(
                 DiscoveredTag(peripheral: peripheral, name: name, rssi: sample, isLikelyITag: likely)
             )
         }
         sortDiscovered()
+        if isUserScanning {
+            PairingPanel.refresh(force: isNew)
+        }
 
         guard !isUserScanning, isReconnectScan, settings.monitoringEnabled else { return }
         if matchesPairedTag(peripheral, name: name) {
@@ -399,6 +429,7 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         smoothedRSSI = nil
         weakSince = nil
         status = .connected
+        peripheral.discoverServices(Self.itagServiceUUIDs)
         startRSSIPolling(peripheral)
         peripheral.readRSSI()
     }
@@ -685,15 +716,34 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
     }
 
-    private static func isLikelyITag(_ name: String) -> Bool {
-        let folded = name.lowercased().replacingOccurrences(of: " ", with: "")
-        return folded.contains("itag") || folded.contains("i-tag")
+    private static func isLikelyITag(name: String, services: [CBUUID]) -> Bool {
+        let folded = name.lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        let nameHit = folded.contains("itag")
+            || folded.contains("itrace")
+            || folded.contains("itracing")
+        let serviceHit = services.contains { advertised in
+            itagHintServiceUUIDs.contains(advertised)
+        }
+        return nameHit || serviceHit
     }
+
+    /// Services this generic iTAG / iTracing keyfinder advertises or exposes.
+    private static let itagHintServiceUUIDs: [CBUUID] = [
+        CBUUID(string: "1802"),
+        CBUUID(string: "1803"),
+        CBUUID(string: "FFE0"),
+        CBUUID(string: "FFE1"),
+        CBUUID(string: "FFF0"),
+    ]
 
     private static let itagServiceUUIDs: [CBUUID] = [
         CBUUID(string: "1802"),
         CBUUID(string: "1803"),
         CBUUID(string: "180F"),
         CBUUID(string: "FFE0"),
+        CBUUID(string: "FFE1"),
+        CBUUID(string: "FFF0"),
     ]
 }

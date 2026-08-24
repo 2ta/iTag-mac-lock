@@ -7,6 +7,7 @@ struct MenuBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            labeledRow("Version", AppVersion.display)
             statusSection
             countdownSection
             rssiSection
@@ -95,7 +96,7 @@ struct MenuBarView: View {
                 }
 
                 if monitor.discovered.isEmpty && monitor.isUserScanning {
-                    Text("Turn the iTag on (long-press until it beeps) and hold it near the Mac.")
+                    Text("Insert a CR2032, long-press the iTAG until it beeps, hold it next to the Mac, and disconnect it from your phone if it is already paired there.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -110,7 +111,7 @@ struct MenuBarView: View {
                                     HStack {
                                         VStack(alignment: .leading, spacing: 2) {
                                             HStack(spacing: 6) {
-                                                Text(tag.name)
+                                                Text(tag.displayName)
                                                     .foregroundStyle(.primary)
                                                 if tag.isLikelyITag {
                                                     Text("iTag")

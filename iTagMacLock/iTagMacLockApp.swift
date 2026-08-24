@@ -1,5 +1,11 @@
 import SwiftUI
 
+enum AppVersion {
+    static let marketing = "1.1"
+    static let build = "2"
+    static var display: String { "\(marketing) (\(build))" }
+}
+
 @main
 struct iTagMacLockApp: App {
     init() {
