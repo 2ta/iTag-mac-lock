@@ -3,6 +3,8 @@ import SwiftUI
 
 struct MenuBarView: View {
     @Bindable var monitor: TagMonitor
+    @State private var unlockPassword = UnlockPasswordStore.load() ?? ""
+    @State private var isUnlockPasswordVisible = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -231,6 +233,61 @@ struct MenuBarView: View {
                         in: 3...30,
                         step: 1
                     )
+                }
+            }
+
+            Toggle(
+                "Click tag to lock",
+                isOn: Binding(
+                    get: { monitor.settings.clickToLockEnabled },
+                    set: { monitor.settings.clickToLockEnabled = $0 }
+                )
+            )
+            .font(.subheadline)
+
+            Toggle(
+                "Double-click tag to unlock",
+                isOn: Binding(
+                    get: { monitor.settings.doubleClickToUnlockEnabled },
+                    set: { enabled in
+                        monitor.settings.doubleClickToUnlockEnabled = enabled
+                        if enabled {
+                            ScreenLocker.requestAccessibility()
+                        }
+                    }
+                )
+            )
+            .font(.subheadline)
+
+            if monitor.settings.doubleClickToUnlockEnabled {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Group {
+                            if isUnlockPasswordVisible {
+                                TextField("Mac password for unlock", text: $unlockPassword)
+                            } else {
+                                SecureField("Mac password for unlock", text: $unlockPassword)
+                            }
+                        }
+                        .textFieldStyle(.roundedBorder)
+
+                        Button {
+                            isUnlockPasswordVisible.toggle()
+                        } label: {
+                            Image(systemName: isUnlockPasswordVisible ? "eye.slash" : "eye")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(isUnlockPasswordVisible ? "Hide password" : "Show password")
+                        .accessibilityLabel(isUnlockPasswordVisible ? "Hide password" : "Show password")
+                    }
+                    .onChange(of: unlockPassword) { _, newValue in
+                        UnlockPasswordStore.save(newValue)
+                    }
+                    Text("Stored in Keychain. Needed so a double-click can type it on the lock screen. Allow Accessibility when asked.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

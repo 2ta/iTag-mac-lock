@@ -2,7 +2,7 @@ import SwiftUI
 
 enum AppVersion {
     static let marketing = "1.1"
-    static let build = "2"
+    static let build = "3"
     static var display: String { "\(marketing) (\(build))" }
 }
 

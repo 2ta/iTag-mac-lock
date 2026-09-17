@@ -82,7 +82,7 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         case .paused:
             return "Monitoring paused."
         case .connected:
-            return "Connected to \(displayName)."
+            return connectedHintText
         case .weakSignal:
             return "Signal is weak. Locking if it stays weak."
         case .disconnected:
@@ -99,6 +99,19 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         settings.pairedPeripheralName ?? "iTag"
     }
 
+    private var connectedHintText: String {
+        switch (settings.clickToLockEnabled, settings.doubleClickToUnlockEnabled) {
+        case (true, true):
+            return "Connected to \(displayName). Click the tag to lock, double-click to unlock."
+        case (true, false):
+            return "Connected to \(displayName). Click the tag to lock."
+        case (false, true):
+            return "Connected to \(displayName). Double-click the tag to unlock."
+        case (false, false):
+            return "Connected to \(displayName)."
+        }
+    }
+
     private var central: CBCentralManager!
     private var pairedPeripheral: CBPeripheral?
     private var rssiTimer: Timer?
@@ -111,6 +124,12 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var userInitiatedDisconnect = false
     private var keepAlive: NSObjectProtocol?
     private var isReconnectScan = false
+    private var pendingSingleClickTimer: Timer?
+    private var awaitingSecondClick = false
+    private var clickDebounceUntil = Date.distantPast
+    private var silenceCharacteristics: [CBCharacteristic] = []
+    private var silenceRetryTimers: [Timer] = []
+    private var silenceKeepAliveTimer: Timer?
 
     private static let rssiSmoothing = 0.3
     private static let hysteresis = 5.0
@@ -170,9 +189,7 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         central.stopScan()
         isUserScanning = false
         isReconnectScan = false
-        if let peripheral = pairedPeripheral {
-            central.cancelPeripheralConnection(peripheral)
-        }
+        disconnectQuietly()
         pairedPeripheral = nil
         settings.pairedPeripheralID = nil
         settings.pairedPeripheralName = nil
@@ -194,9 +211,7 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             central.stopScan()
             isUserScanning = false
             isReconnectScan = false
-            if let peripheral = pairedPeripheral {
-                central.cancelPeripheralConnection(peripheral)
-            }
+            disconnectQuietly()
             rawRSSI = nil
             smoothedRSSI = nil
             weakSince = nil
@@ -273,6 +288,33 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             if self.pairedPeripheral?.identifier == peripheral.identifier, let name, !name.isEmpty {
                 self.settings.pairedPeripheralName = name
             }
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        Task { @MainActor in
+            self.handleDiscoveredServices(peripheral)
+        }
+    }
+
+    nonisolated func peripheral(
+        _ peripheral: CBPeripheral,
+        didDiscoverCharacteristicsFor service: CBService,
+        error: Error?
+    ) {
+        Task { @MainActor in
+            self.handleDiscoveredCharacteristics(peripheral, service: service)
+        }
+    }
+
+    nonisolated func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard error == nil else { return }
+        Task { @MainActor in
+            self.handleButtonNotification(from: characteristic)
         }
     }
 
@@ -429,7 +471,9 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         smoothedRSSI = nil
         weakSince = nil
         status = .connected
-        peripheral.discoverServices(Self.itagServiceUUIDs)
+        silenceCharacteristics.removeAll()
+        stopSilenceWrites()
+        peripheral.discoverServices(nil)
         startRSSIPolling(peripheral)
         peripheral.readRSSI()
     }
@@ -446,9 +490,11 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         connectTimeout?.invalidate()
         connectTimeout = nil
         stopRSSIPolling()
+        stopSilenceWrites()
         rawRSSI = nil
         smoothedRSSI = nil
         weakSince = nil
+        silenceCharacteristics.removeAll()
 
         let initiated = userInitiatedDisconnect
         userInitiatedDisconnect = false
@@ -572,6 +618,8 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             }
             if weakSince == nil {
                 weakSince = Date()
+                // Last chance to set No Alert before the radio drops out of range.
+                silenceTag()
             }
             if countdownRemaining == nil,
                let weakSince, Date().timeIntervalSince(weakSince) >= settings.debounceSeconds {
@@ -692,6 +740,10 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         reconnectTimer = nil
         connectTimeout?.invalidate()
         connectTimeout = nil
+        pendingSingleClickTimer?.invalidate()
+        pendingSingleClickTimer = nil
+        awaitingSecondClick = false
+        stopSilenceWrites()
         clearLockCountdown()
     }
 
@@ -728,6 +780,216 @@ final class TagMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
         return nameHit || serviceHit
     }
+
+    // MARK: - Tag button
+
+    private func handleDiscoveredServices(_ peripheral: CBPeripheral) {
+        guard pairedPeripheral?.identifier == peripheral.identifier else { return }
+        for service in peripheral.services ?? [] {
+            peripheral.discoverCharacteristics(nil, for: service)
+        }
+    }
+
+    private func handleDiscoveredCharacteristics(_ peripheral: CBPeripheral, service: CBService) {
+        guard pairedPeripheral?.identifier == peripheral.identifier else { return }
+        var foundNewSilenceTarget = false
+        for characteristic in service.characteristics ?? [] {
+            if Self.buttonCharacteristicUUIDs.contains(characteristic.uuid),
+               characteristic.properties.contains(.notify) || characteristic.properties.contains(.indicate) {
+                peripheral.setNotifyValue(true, for: characteristic)
+            }
+            if Self.canSilence(characteristic), !alreadyTrackingSilence(characteristic) {
+                silenceCharacteristics.append(characteristic)
+                foundNewSilenceTarget = true
+            }
+        }
+        if foundNewSilenceTarget {
+            silenceTag(on: peripheral)
+            scheduleSilenceRetries(for: peripheral)
+            startSilenceKeepAlive(for: peripheral)
+        }
+    }
+
+    /// Link Loss 0x00 = no beep when the connection drops. Immediate Alert / FFE1 0x00 stops an active beep.
+    /// Cheap clones often ignore 1803 unless written after a delay, and some reset Alert Level to High on connect.
+    private static func canSilence(_ characteristic: CBCharacteristic) -> Bool {
+        let writable = characteristic.properties.contains(.write)
+            || characteristic.properties.contains(.writeWithoutResponse)
+        guard writable else { return false }
+        if characteristic.uuid == batteryLevelUUID { return false }
+        if characteristic.uuid == alertLevelUUID { return true }
+        if buttonCharacteristicUUIDs.contains(characteristic.uuid) { return true }
+        if let serviceUUID = characteristic.service?.uuid, alertServiceUUIDs.contains(serviceUUID) {
+            return true
+        }
+        return false
+    }
+
+    private func alreadyTrackingSilence(_ characteristic: CBCharacteristic) -> Bool {
+        silenceCharacteristics.contains { existing in
+            existing.uuid == characteristic.uuid
+                && existing.service?.uuid == characteristic.service?.uuid
+        }
+    }
+
+    private func silenceTag(on peripheral: CBPeripheral? = nil) {
+        let target = peripheral ?? pairedPeripheral
+        guard let target, target.state == .connected else { return }
+        let off = Data([0x00])
+        let ordered = silenceCharacteristics.sorted { silencePriority($0) < silencePriority($1) }
+        for characteristic in ordered {
+            guard let type = Self.writeType(for: characteristic) else { continue }
+            target.writeValue(off, for: characteristic, type: type)
+        }
+    }
+
+    /// Immediate Alert is Write Without Response; Link Loss is Write with response. Prefer the spec when both exist.
+    private static func writeType(for characteristic: CBCharacteristic) -> CBCharacteristicWriteType? {
+        let canWithResponse = characteristic.properties.contains(.write)
+        let canWithoutResponse = characteristic.properties.contains(.writeWithoutResponse)
+        guard canWithResponse || canWithoutResponse else { return nil }
+
+        let serviceUUID = characteristic.service?.uuid
+        if serviceUUID == linkLossServiceUUID {
+            return canWithResponse ? .withResponse : .withoutResponse
+        }
+        if serviceUUID == immediateAlertServiceUUID {
+            return canWithoutResponse ? .withoutResponse : .withResponse
+        }
+        if canWithoutResponse { return .withoutResponse }
+        return .withResponse
+    }
+
+    private func silencePriority(_ characteristic: CBCharacteristic) -> Int {
+        let service = characteristic.service?.uuid
+        if service == Self.linkLossServiceUUID { return 0 }
+        if characteristic.uuid == Self.alertLevelUUID { return 1 }
+        if service == Self.immediateAlertServiceUUID { return 2 }
+        if Self.buttonCharacteristicUUIDs.contains(characteristic.uuid) { return 3 }
+        return 4
+    }
+
+    private func scheduleSilenceRetries(for peripheral: CBPeripheral) {
+        guard silenceRetryTimers.isEmpty else { return }
+        let identifier = peripheral.identifier
+        for delay in [0.4, 1.5] {
+            let timer = Timer(timeInterval: delay, repeats: false) { _ in
+                Task { @MainActor in
+                    guard TagMonitor.shared.pairedPeripheral?.identifier == identifier else { return }
+                    TagMonitor.shared.silenceTag()
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            silenceRetryTimers.append(timer)
+        }
+    }
+
+    private func startSilenceKeepAlive(for peripheral: CBPeripheral) {
+        guard silenceKeepAliveTimer == nil else { return }
+        let identifier = peripheral.identifier
+        let timer = Timer(timeInterval: 4.0, repeats: true) { _ in
+            Task { @MainActor in
+                guard let current = TagMonitor.shared.pairedPeripheral,
+                      current.identifier == identifier,
+                      current.state == .connected else { return }
+                TagMonitor.shared.silenceTag(on: current)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        silenceKeepAliveTimer = timer
+    }
+
+    private func stopSilenceWrites() {
+        silenceRetryTimers.forEach { $0.invalidate() }
+        silenceRetryTimers.removeAll()
+        silenceKeepAliveTimer?.invalidate()
+        silenceKeepAliveTimer = nil
+    }
+
+    private func disconnectQuietly() {
+        guard let peripheral = pairedPeripheral else { return }
+        silenceTag(on: peripheral)
+        let identifier = peripheral.identifier
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            if let current = self.pairedPeripheral, current.identifier == identifier {
+                self.central.cancelPeripheralConnection(current)
+            } else {
+                self.central.cancelPeripheralConnection(peripheral)
+            }
+        }
+    }
+
+    private func handleButtonNotification(from characteristic: CBCharacteristic) {
+        guard settings.clickToLockEnabled || settings.doubleClickToUnlockEnabled else { return }
+        guard pairedPeripheral != nil else { return }
+        guard Self.buttonCharacteristicUUIDs.contains(characteristic.uuid) else { return }
+        // Ignore 0x00 echoes from the No Alert write so silence does not look like a button click.
+        if let value = characteristic.value, value.allSatisfy({ $0 == 0 }) { return }
+
+        let now = Date()
+        if now < clickDebounceUntil { return }
+        clickDebounceUntil = now.addingTimeInterval(0.12)
+
+        if awaitingSecondClick {
+            awaitingSecondClick = false
+            pendingSingleClickTimer?.invalidate()
+            pendingSingleClickTimer = nil
+            handleTagDoubleClick()
+            return
+        }
+
+        awaitingSecondClick = true
+        pendingSingleClickTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.5, repeats: false) { _ in
+            Task { @MainActor in
+                TagMonitor.shared.finishPendingSingleClick()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pendingSingleClickTimer = timer
+    }
+
+    private func finishPendingSingleClick() {
+        awaitingSecondClick = false
+        pendingSingleClickTimer = nil
+        handleTagSingleClick()
+    }
+
+    private func handleTagSingleClick() {
+        guard settings.clickToLockEnabled else { return }
+        if countdownRemaining != nil {
+            lockNow()
+            return
+        }
+        ScreenLocker.lock()
+    }
+
+    private func handleTagDoubleClick() {
+        guard settings.doubleClickToUnlockEnabled else { return }
+        if countdownRemaining != nil {
+            cancelLockCountdown()
+            return
+        }
+        ScreenLocker.unlock()
+    }
+
+    /// Button notify characteristics used by generic iTAG / iTracing clones.
+    private static let buttonCharacteristicUUIDs: [CBUUID] = [
+        CBUUID(string: "FFE1"),
+        CBUUID(string: "FFE2"),
+        CBUUID(string: "FFF1"),
+    ]
+
+    private static let alertLevelUUID = CBUUID(string: "2A06")
+    private static let batteryLevelUUID = CBUUID(string: "2A19")
+    private static let immediateAlertServiceUUID = CBUUID(string: "1802")
+    private static let linkLossServiceUUID = CBUUID(string: "1803")
+    private static let ffe0ServiceUUID = CBUUID(string: "FFE0")
+    private static let alertServiceUUIDs: Set<CBUUID> = [
+        immediateAlertServiceUUID,
+        linkLossServiceUUID,
+        ffe0ServiceUUID,
+    ]
 
     /// Services this generic iTAG / iTracing keyfinder advertises or exposes.
     private static let itagHintServiceUUIDs: [CBUUID] = [

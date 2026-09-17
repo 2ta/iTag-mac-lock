@@ -13,6 +13,9 @@ final class AppSettings {
         static let monitoringEnabled = "monitoringEnabled"
         static let countdownEnabled = "countdownEnabled"
         static let countdownSeconds = "countdownSeconds"
+        static let buttonActionsEnabled = "buttonActionsEnabled"
+        static let clickToLockEnabled = "clickToLockEnabled"
+        static let doubleClickToUnlockEnabled = "doubleClickToUnlockEnabled"
     }
 
     /// Default: roughly “across a room”. More negative = farther away before lock.
@@ -62,6 +65,18 @@ final class AppSettings {
         }
     }
 
+    var clickToLockEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(clickToLockEnabled, forKey: Key.clickToLockEnabled)
+        }
+    }
+
+    var doubleClickToUnlockEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(doubleClickToUnlockEnabled, forKey: Key.doubleClickToUnlockEnabled)
+        }
+    }
+
     private init() {
         if let raw = UserDefaults.standard.string(forKey: Key.pairedPeripheralID) {
             pairedPeripheralID = UUID(uuidString: raw)
@@ -100,5 +115,19 @@ final class AppSettings {
         } else {
             countdownSeconds = Self.defaultCountdownSeconds
         }
+
+        clickToLockEnabled = Self.loadMigratedBool(key: Key.clickToLockEnabled)
+        doubleClickToUnlockEnabled = Self.loadMigratedBool(key: Key.doubleClickToUnlockEnabled)
+    }
+
+    /// Prefer the split flag; fall back to the old combined `buttonActionsEnabled` so existing users keep their choice.
+    private static func loadMigratedBool(key: String) -> Bool {
+        if UserDefaults.standard.object(forKey: key) != nil {
+            return UserDefaults.standard.bool(forKey: key)
+        }
+        if UserDefaults.standard.object(forKey: Key.buttonActionsEnabled) != nil {
+            return UserDefaults.standard.bool(forKey: Key.buttonActionsEnabled)
+        }
+        return true
     }
 }
