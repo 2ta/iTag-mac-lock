@@ -2,7 +2,7 @@ import SwiftUI
 
 enum AppVersion {
     static let marketing = "1.2"
-    static let build = "4"
+    static let build = "5"
     static var display: String { "\(marketing) (\(build))" }
     static let githubURL = URL(string: "https://github.com/2ta/iTag-mac-lock")!
     static let githubReleasesURL = URL(string: "https://github.com/2ta/iTag-mac-lock/releases")!
