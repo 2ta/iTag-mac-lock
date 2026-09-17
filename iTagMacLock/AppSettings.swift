@@ -16,6 +16,8 @@ final class AppSettings {
         static let buttonActionsEnabled = "buttonActionsEnabled"
         static let clickToLockEnabled = "clickToLockEnabled"
         static let doubleClickToUnlockEnabled = "doubleClickToUnlockEnabled"
+        static let weeklyUpdateCheckEnabled = "weeklyUpdateCheckEnabled"
+        static let lastUpdateCheckDate = "lastUpdateCheckDate"
     }
 
     /// Default: roughly “across a room”. More negative = farther away before lock.
@@ -77,6 +79,18 @@ final class AppSettings {
         }
     }
 
+    var weeklyUpdateCheckEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(weeklyUpdateCheckEnabled, forKey: Key.weeklyUpdateCheckEnabled)
+        }
+    }
+
+    var lastUpdateCheckDate: Date? {
+        didSet {
+            UserDefaults.standard.set(lastUpdateCheckDate, forKey: Key.lastUpdateCheckDate)
+        }
+    }
+
     private init() {
         if let raw = UserDefaults.standard.string(forKey: Key.pairedPeripheralID) {
             pairedPeripheralID = UUID(uuidString: raw)
@@ -118,6 +132,14 @@ final class AppSettings {
 
         clickToLockEnabled = Self.loadMigratedBool(key: Key.clickToLockEnabled)
         doubleClickToUnlockEnabled = Self.loadMigratedBool(key: Key.doubleClickToUnlockEnabled)
+
+        if UserDefaults.standard.object(forKey: Key.weeklyUpdateCheckEnabled) != nil {
+            weeklyUpdateCheckEnabled = UserDefaults.standard.bool(forKey: Key.weeklyUpdateCheckEnabled)
+        } else {
+            weeklyUpdateCheckEnabled = true
+        }
+
+        lastUpdateCheckDate = UserDefaults.standard.object(forKey: Key.lastUpdateCheckDate) as? Date
     }
 
     /// Prefer the split flag; fall back to the old combined `buttonActionsEnabled` so existing users keep their choice.

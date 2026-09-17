@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 
 struct MenuBarView: View {
-    @Bindable var monitor: TagMonitor
-    @State private var unlockPassword = UnlockPasswordStore.load() ?? ""
-    @State private var isUnlockPasswordVisible = false
+    var monitor: TagMonitor
+    private var unlockDraft = UnlockPasswordDraft.shared
+    private var updates = UpdateChecker.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -17,6 +17,10 @@ struct MenuBarView: View {
             pairingSection
             Divider()
             settingsSection
+            Divider()
+            updatesSection
+            Divider()
+            aboutSection
             Divider()
             actions
         }
@@ -263,26 +267,35 @@ struct MenuBarView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Group {
-                            if isUnlockPasswordVisible {
-                                TextField("Mac password for unlock", text: $unlockPassword)
+                            if unlockDraft.isVisible {
+                                TextField(
+                                    "Mac password for unlock",
+                                    text: Binding(
+                                        get: { unlockDraft.password },
+                                        set: { unlockDraft.password = $0 }
+                                    )
+                                )
                             } else {
-                                SecureField("Mac password for unlock", text: $unlockPassword)
+                                SecureField(
+                                    "Mac password for unlock",
+                                    text: Binding(
+                                        get: { unlockDraft.password },
+                                        set: { unlockDraft.password = $0 }
+                                    )
+                                )
                             }
                         }
                         .textFieldStyle(.roundedBorder)
 
                         Button {
-                            isUnlockPasswordVisible.toggle()
+                            unlockDraft.isVisible.toggle()
                         } label: {
-                            Image(systemName: isUnlockPasswordVisible ? "eye.slash" : "eye")
+                            Image(systemName: unlockDraft.isVisible ? "eye.slash" : "eye")
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
-                        .help(isUnlockPasswordVisible ? "Hide password" : "Show password")
-                        .accessibilityLabel(isUnlockPasswordVisible ? "Hide password" : "Show password")
-                    }
-                    .onChange(of: unlockPassword) { _, newValue in
-                        UnlockPasswordStore.save(newValue)
+                        .help(unlockDraft.isVisible ? "Hide password" : "Show password")
+                        .accessibilityLabel(unlockDraft.isVisible ? "Hide password" : "Show password")
                     }
                     Text("Stored in Keychain. Needed so a double-click can type it on the lock screen. Allow Accessibility when asked.")
                         .font(.caption)
@@ -290,6 +303,75 @@ struct MenuBarView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    private var updatesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Updates")
+                .font(.subheadline.weight(.semibold))
+
+            Toggle(
+                "Check for updates weekly",
+                isOn: Binding(
+                    get: { monitor.settings.weeklyUpdateCheckEnabled },
+                    set: { enabled in
+                        monitor.settings.weeklyUpdateCheckEnabled = enabled
+                        if enabled {
+                            UpdateChecker.shared.scheduleLaunchCheck()
+                        }
+                    }
+                )
+            )
+            .font(.subheadline)
+
+            Text(updates.statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Button {
+                    Task {
+                        await UpdateChecker.shared.checkForUpdates(userInitiated: true)
+                    }
+                } label: {
+                    if updates.isChecking {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Checking…")
+                    } else {
+                        Text("Check for Updates…")
+                    }
+                }
+                .disabled(updates.isChecking)
+
+                if updates.availableRelease != nil {
+                    Button("Open Release") {
+                        UpdateChecker.shared.openAvailableRelease()
+                    }
+                }
+            }
+        }
+    }
+
+    private var aboutSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("About")
+                .font(.subheadline.weight(.semibold))
+
+            Text("Locks this Mac when your iTAG walks away. Open source on GitHub.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            labeledRow("Version", AppVersion.display)
+
+            Link("GitHub project", destination: AppVersion.githubURL)
+                .font(.subheadline)
+
+            Link("Releases", destination: AppVersion.githubReleasesURL)
+                .font(.subheadline)
         }
     }
 
